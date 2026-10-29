@@ -1,0 +1,1192 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <title>Simple Space Shooter</title>
+  <style>
+    :root {
+      --bg: #070b1a;
+      --panel: #111a35;
+      --text: #e8eeff;
+      --accent: #4fd1ff;
+      --danger: #ff6b6b;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      display: grid;
+      place-items: center;
+      background: radial-gradient(circle at top, #162147, var(--bg) 70%);
+      color: var(--text);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif;
+      padding: 18px;
+    }
+
+    .game-shell {
+      width: min(100%, 420px);
+      background: linear-gradient(180deg, #151f40, #0f1832);
+      border: 1px solid #31437d;
+      border-radius: 18px;
+      padding: 14px;
+      box-shadow: 0 20px 35px rgba(0, 0, 0, 0.4);
+    }
+
+    .top {
+      display: flex;
+      justify-content: space-between;
+      margin-bottom: 10px;
+      font-weight: 600;
+      font-size: 14px;
+    }
+
+    #lives {
+      letter-spacing: 1px;
+      text-shadow: 0 0 8px rgba(255, 107, 107, 0.35);
+    }
+
+    canvas {
+      width: 100%;
+      border-radius: 12px;
+      border: 1px solid #2e3d73;
+      background: #070d1f;
+      display: block;
+      touch-action: none;
+    }
+
+    .controls {
+      margin-top: 10px;
+      display: flex;
+      gap: 8px;
+    }
+
+    button {
+      flex: 1;
+      border: none;
+      border-radius: 10px;
+      padding: 10px 12px;
+      font-size: 15px;
+      font-weight: 600;
+      color: #071021;
+      background: var(--accent);
+      cursor: pointer;
+    }
+
+    button:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+    }
+
+    .hint {
+      margin-top: 8px;
+      font-size: 12px;
+      color: #aab7e5;
+    }
+  </style>
+</head>
+<body>
+  <main class="game-shell">
+    <div class="top">
+      <span id="score">Score: 0</span>
+      <span id="level">Level: 1</span>
+      <span id="wave">Wave: 1</span>
+      <span id="lives" aria-label="Lives: 3 of 3">❤️❤️❤️</span>
+    </div>
+    <canvas id="game" width="390" height="640" aria-label="Space shooter game"></canvas>
+    <div class="controls">
+      <button id="startBtn">Start / Restart</button>
+      <button id="pauseBtn">Pause</button>
+    </div>
+    <p class="hint">Desktop: Arrow keys / A,D to move, Space to shoot, P pause. Each level has 2 waves, then a boss. Mobile: drag ship and tap to shoot.</p>
+  </main>
+
+  <script>
+    const canvas = document.getElementById("game");
+    const ctx = canvas.getContext("2d");
+    const scoreEl = document.getElementById("score");
+    const levelEl = document.getElementById("level");
+    const waveEl = document.getElementById("wave");
+    const livesEl = document.getElementById("lives");
+    const startBtn = document.getElementById("startBtn");
+    const pauseBtn = document.getElementById("pauseBtn");
+    let pointerActive = false;
+    let animationFrameId = null;
+
+    const state = {
+      running: false,
+      paused: false,
+      victory: false,
+      endingActive: false,
+      endingTimer: 0,
+      endingShipY: 0,
+      endingShipScale: 1,
+      score: 0,
+      level: 1,
+      waveInLevel: 1,
+      waveResolved: 0,
+      waveSpawned: 0,
+      waveTarget: 9,
+      waveBreakTime: 0,
+      waveBreakAction: null,
+      bossActive: false,
+      bossHitCooldown: 0,
+      boss: null,
+      maxLives: 3,
+      lives: 3,
+      damageFlash: 0,
+      freezeTime: 0,
+      scorchFlash: 0,
+      pendingScorch: false,
+      lastTime: 0,
+      enemySpawnTimer: 0,
+      fireCooldown: 0,
+      stars: [],
+      ship: {
+        x: canvas.width / 2 - 15,
+        y: canvas.height - 56,
+        w: 30,
+        h: 30,
+        speed: 240
+      },
+      bullets: [],
+      bossBullets: [],
+      enemies: [],
+      popups: [],
+      particles: [],
+      confetti: [],
+      keys: new Set()
+    };
+    const WAVES_PER_LEVEL = 2;
+    const LEVEL_CONFIG = {
+      1: { spawnBase: 0.8, spawnMin: 0.34, normalSpeed: 0.85, specialSpeed: 1.9, powerSpeed: 1.0, freezeChance: 0.08, scorchChance: 0.14, specialChance: 0.26 },
+      2: { spawnBase: 0.68, spawnMin: 0.26, normalSpeed: 0.95, specialSpeed: 2.0, powerSpeed: 1.08, freezeChance: 0.09, scorchChance: 0.16, specialChance: 0.3 },
+      3: { spawnBase: 0.56, spawnMin: 0.2, normalSpeed: 1.05, specialSpeed: 2.1, powerSpeed: 1.16, freezeChance: 0.1, scorchChance: 0.18, specialChance: 0.35 }
+    };
+    const MAX_LEVEL = 3;
+
+    const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+    let audioContext = null;
+    let bgmTimerId = null;
+    let bgmStep = 0;
+    let bgmMode = "normal";
+    const BOSS_NAME = "Spiky Boy";
+
+    function getAudioContext() {
+      if (!AudioContextClass) return null;
+      if (!audioContext) {
+        audioContext = new AudioContextClass();
+      }
+      if (audioContext.state === "suspended") {
+        audioContext.resume();
+      }
+      return audioContext;
+    }
+
+    function playTone({ frequency, duration, type = "sine", volume = 0.05, delay = 0 }) {
+      const ctxAudio = getAudioContext();
+      if (!ctxAudio) return;
+
+      const startAt = ctxAudio.currentTime + delay;
+      const endAt = startAt + duration;
+      const oscillator = ctxAudio.createOscillator();
+      const gain = ctxAudio.createGain();
+
+      oscillator.type = type;
+      oscillator.frequency.setValueAtTime(frequency, startAt);
+      gain.gain.setValueAtTime(0.0001, startAt);
+      gain.gain.exponentialRampToValueAtTime(volume, startAt + 0.01);
+      gain.gain.exponentialRampToValueAtTime(0.0001, endAt);
+
+      oscillator.connect(gain);
+      gain.connect(ctxAudio.destination);
+      oscillator.start(startAt);
+      oscillator.stop(endAt);
+    }
+
+    function playShootSfx() {
+      playTone({ frequency: 760, duration: 0.05, type: "square", volume: 0.04 });
+      playTone({ frequency: 560, duration: 0.04, type: "triangle", volume: 0.03, delay: 0.03 });
+    }
+
+    function playEnemyHitSfx() {
+      playTone({ frequency: 420, duration: 0.07, type: "sawtooth", volume: 0.045 });
+      playTone({ frequency: 180, duration: 0.1, type: "triangle", volume: 0.035, delay: 0.05 });
+    }
+
+    function playShipHitSfx() {
+      playTone({ frequency: 190, duration: 0.12, type: "sawtooth", volume: 0.05 });
+      playTone({ frequency: 120, duration: 0.14, type: "sawtooth", volume: 0.045, delay: 0.09 });
+    }
+
+    function playGameOverSfx() {
+      playTone({ frequency: 330, duration: 0.08, type: "triangle", volume: 0.045 });
+      playTone({ frequency: 250, duration: 0.1, type: "triangle", volume: 0.042, delay: 0.09 });
+      playTone({ frequency: 170, duration: 0.16, type: "triangle", volume: 0.04, delay: 0.2 });
+    }
+
+    function playFreezeSfx() {
+      playTone({ frequency: 460, duration: 0.08, type: "triangle", volume: 0.045 });
+      playTone({ frequency: 780, duration: 0.11, type: "sine", volume: 0.038, delay: 0.08 });
+    }
+
+    function playScorchSfx() {
+      playTone({ frequency: 190, duration: 0.07, type: "sawtooth", volume: 0.05 });
+      playTone({ frequency: 300, duration: 0.08, type: "sawtooth", volume: 0.045, delay: 0.06 });
+      playTone({ frequency: 420, duration: 0.09, type: "triangle", volume: 0.042, delay: 0.12 });
+    }
+
+    function playWaveSfx() {
+      playTone({ frequency: 520, duration: 0.08, type: "triangle", volume: 0.045 });
+      playTone({ frequency: 700, duration: 0.1, type: "triangle", volume: 0.042, delay: 0.07 });
+    }
+
+    function stopBgm() {
+      if (bgmTimerId !== null) {
+        clearTimeout(bgmTimerId);
+        bgmTimerId = null;
+      }
+    }
+
+    function playBgmStep() {
+      if (!state.running || state.paused) {
+        bgmTimerId = null;
+        return;
+      }
+
+      const progressIndex = (state.level - 1) * WAVES_PER_LEVEL + (state.waveInLevel - 1);
+      const intensity = progressIndex * 0.14 + Math.min(0.24, (state.waveResolved / Math.max(1, state.waveTarget)) * 0.24);
+      const cycleIndex = Math.floor(progressIndex / 2) % 2;
+      const isBossBgm = bgmMode === "boss";
+      const melody = isBossBgm
+        ? [165, 196, 220, 185, 175, 220, 247, 196]
+        : cycleIndex === 0
+          ? [220, 262, 330, 294, 247, 294, 370, 330]
+          : [247, 294, 349, 330, 294, 262, 330, 392];
+      const bass = isBossBgm
+        ? [82, 98, 110, 92]
+        : cycleIndex === 0 ? [110, 131, 147, 123] : [123, 147, 165, 131];
+      const note = melody[bgmStep % melody.length];
+      const bassNote = bass[Math.floor(bgmStep / 2) % bass.length];
+      const leadDuration = Math.max(0.1, (isBossBgm ? 0.19 : 0.16) - intensity * 0.03);
+      const bassDuration = Math.max(0.14, (isBossBgm ? 0.26 : 0.22) - intensity * 0.04);
+      const stepMs = isBossBgm
+        ? Math.max(135, Math.round(215 - intensity * 45))
+        : Math.max(145, Math.round(250 - intensity * 70));
+
+      playTone({
+        frequency: note,
+        duration: leadDuration,
+        type: isBossBgm ? "sawtooth" : "triangle",
+        volume: (isBossBgm ? 0.026 : 0.02) + intensity * 0.004
+      });
+      if (bgmStep % 2 === 0) {
+        playTone({
+          frequency: bassNote,
+          duration: bassDuration,
+          type: isBossBgm ? "square" : "sine",
+          volume: (isBossBgm ? 0.017 : 0.012) + intensity * 0.003,
+          delay: 0.02
+        });
+      }
+
+      bgmStep += 1;
+      bgmTimerId = setTimeout(playBgmStep, stepMs);
+    }
+
+    function startBgm(mode) {
+      stopBgm();
+      if (mode) {
+        bgmMode = mode;
+      }
+      bgmStep = 0;
+      playBgmStep();
+    }
+
+    for (let i = 0; i < 70; i += 1) {
+      state.stars.push({
+        x: Math.random() * canvas.width,
+        y: Math.random() * canvas.height,
+        size: Math.random() * 2 + 1,
+        speed: Math.random() * 25 + 12
+      });
+    }
+
+    function resetGame() {
+      state.running = true;
+      state.paused = false;
+      state.victory = false;
+      state.endingActive = false;
+      state.endingTimer = 0;
+      state.endingShipY = state.ship.y;
+      state.endingShipScale = 1;
+      state.score = 0;
+      state.level = 1;
+      state.waveInLevel = 1;
+      state.waveResolved = 0;
+      state.waveSpawned = 0;
+      state.waveTarget = getWaveTargetForLevel(1, 1);
+      state.waveBreakTime = 0;
+      state.waveBreakAction = null;
+      state.bossActive = false;
+      state.bossHitCooldown = 0;
+      state.boss = null;
+      state.lives = state.maxLives;
+      state.damageFlash = 0;
+      state.freezeTime = 0;
+      state.scorchFlash = 0;
+      state.pendingScorch = false;
+      state.enemySpawnTimer = 0.4;
+      state.fireCooldown = 0;
+      state.bullets = [];
+      state.bossBullets = [];
+      state.enemies = [];
+      state.popups = [];
+      state.particles = [];
+      state.confetti = [];
+      state.keys.clear();
+      pointerActive = false;
+      state.ship.x = canvas.width / 2 - state.ship.w / 2;
+      updateHud();
+      updatePauseButton();
+      state.lastTime = performance.now();
+      if (animationFrameId !== null) {
+        cancelAnimationFrame(animationFrameId);
+      }
+      bgmMode = "normal";
+      startBgm("normal");
+      animationFrameId = requestAnimationFrame(loop);
+    }
+
+    function getWaveTargetForLevel(level, waveInLevel) {
+      return 9 + (level - 1) * 3 + (waveInLevel - 1) * 2;
+    }
+
+    function updateHud() {
+      scoreEl.textContent = `Score: ${state.score}`;
+      levelEl.textContent = `Level: ${state.level}`;
+      waveEl.textContent = state.bossActive
+        ? `Boss: L${state.level}`
+        : `Wave: ${state.waveInLevel}/${WAVES_PER_LEVEL} (${Math.min(state.waveResolved, state.waveTarget)}/${state.waveTarget})`;
+      const lives = Math.max(0, Math.min(state.maxLives, state.lives));
+      livesEl.textContent = `${"❤️".repeat(lives)}${"🤍".repeat(Math.max(0, state.maxLives - lives))}`;
+      livesEl.setAttribute("aria-label", `Lives: ${lives} of ${state.maxLives}`);
+    }
+
+    function startWaveBreak(nextStepText, breakAction = "next-wave") {
+      if (state.waveBreakTime > 0 || !state.running) return;
+      state.waveBreakTime = 2.6;
+      state.waveBreakAction = breakAction;
+      state.enemies = [];
+      state.popups.push({
+        x: canvas.width / 2,
+        y: canvas.height * 0.3,
+        text: nextStepText || "WAVE CLEAR!",
+        life: 0.9,
+        maxLife: 0.9,
+        vy: -22
+      });
+      if (state.lives < state.maxLives) {
+        state.lives += 1;
+        state.popups.push({
+          x: canvas.width / 2,
+          y: canvas.height * 0.36,
+          text: "+1 ❤️",
+          life: 0.75,
+          maxLife: 0.75,
+          vy: -20
+        });
+      }
+      updateHud();
+      playWaveSfx();
+    }
+
+    function createBossForLevel(level) {
+      const size = 92 + level * 8;
+      return {
+        x: canvas.width / 2 - size / 2,
+        y: -size,
+        w: size,
+        h: size,
+        hp: 120 + level * 90,
+        maxHp: 120 + level * 90,
+        speed: 72 + level * 16,
+        dir: 1,
+        entryY: 72,
+        spin: 0,
+        shootTimer: Math.max(0.9, 1.55 - level * 0.14)
+      };
+    }
+
+    function startBossBattle() {
+      state.waveBreakAction = null;
+      state.bossActive = true;
+      state.pendingScorch = false;
+      state.bossHitCooldown = 0;
+      state.boss = createBossForLevel(state.level);
+      state.bossBullets = [];
+      state.enemySpawnTimer = 0.4;
+      state.popups.push({
+        x: canvas.width / 2,
+        y: canvas.height * 0.3,
+        text: `${BOSS_NAME} ARRIVES`,
+        life: 1.1,
+        maxLife: 1.1,
+        vy: -18
+      });
+      updateHud();
+      playWaveSfx();
+      startBgm("boss");
+    }
+
+    function startFinale() {
+      state.endingActive = true;
+      state.endingTimer = 0;
+      state.endingShipY = state.ship.y;
+      state.endingShipScale = 1;
+      state.waveBreakTime = 0;
+      state.waveBreakAction = null;
+      state.confetti = [];
+      const colors = ["#ff5f6d", "#ffd166", "#4fd1ff", "#7dffb2", "#ff9cf5", "#ffffff"];
+      for (let i = 0; i < 140; i += 1) {
+        state.confetti.push({
+          x: Math.random() * canvas.width,
+          y: -Math.random() * canvas.height,
+          vx: (Math.random() - 0.5) * 90,
+          vy: 90 + Math.random() * 180,
+          size: 2 + Math.random() * 3.8,
+          rot: Math.random() * Math.PI * 2,
+          spin: (Math.random() - 0.5) * 8,
+          color: colors[Math.floor(Math.random() * colors.length)]
+        });
+      }
+      stopBgm();
+      playWaveSfx();
+    }
+
+    function updateFinale(dt) {
+      state.endingTimer += dt;
+      state.endingShipScale = Math.min(2.6, state.endingShipScale + dt * 0.75);
+      state.endingShipY -= (110 + state.endingTimer * 140) * dt;
+
+      state.confetti.forEach((c) => {
+        c.x += c.vx * dt;
+        c.y += c.vy * dt;
+        c.rot += c.spin * dt;
+        if (c.y > canvas.height + 20) {
+          c.y = -20 - Math.random() * 70;
+          c.x = Math.random() * canvas.width;
+        }
+      });
+
+      if (state.endingTimer > 3.2 && state.endingShipY < -state.ship.h * state.endingShipScale - 40) {
+        state.endingActive = false;
+        state.victory = true;
+        state.running = false;
+      }
+    }
+
+    function startNextWave() {
+      state.waveBreakAction = null;
+      state.waveInLevel += 1;
+      state.waveResolved = 0;
+      state.waveSpawned = 0;
+      state.waveTarget = getWaveTargetForLevel(state.level, state.waveInLevel);
+      state.enemySpawnTimer = 0.35;
+      state.popups.push({
+        x: canvas.width / 2,
+        y: canvas.height * 0.3,
+        text: `WAVE ${state.waveInLevel}/${WAVES_PER_LEVEL}`,
+        life: 0.9,
+        maxLife: 0.9,
+        vy: -24
+      });
+      updateHud();
+      playWaveSfx();
+    }
+
+    function updatePauseButton() {
+      pauseBtn.textContent = state.paused ? "Resume" : "Pause";
+      pauseBtn.disabled = !state.running;
+    }
+
+    function togglePause() {
+      if (!state.running) return;
+      state.paused = !state.paused;
+      if (state.paused) {
+        state.keys.clear();
+        pointerActive = false;
+        stopBgm();
+      } else {
+        state.lastTime = performance.now();
+        startBgm();
+      }
+      updatePauseButton();
+    }
+
+    function awardEnemyKill(enemy) {
+      const points = enemy.points || 10;
+      state.score += points;
+      state.waveResolved += 1;
+      state.popups.push({
+        x: enemy.x + enemy.w / 2,
+        y: enemy.y + enemy.h / 2,
+        text: `+${points}`,
+        life: 0.45,
+        maxLife: 0.45,
+        vy: -60
+      });
+      if (enemy.kind === "freeze") {
+        state.freezeTime = Math.max(state.freezeTime, 3.2);
+        state.popups.push({
+          x: enemy.x + enemy.w / 2,
+          y: enemy.y + enemy.h / 2 - 16,
+          text: "FREEZE!",
+          life: 0.7,
+          maxLife: 0.7,
+          vy: -30
+        });
+        playFreezeSfx();
+      } else if (enemy.kind === "scorch") {
+        state.scorchFlash = 1;
+        state.pendingScorch = true;
+        state.popups.push({
+          x: enemy.x + enemy.w / 2,
+          y: enemy.y + enemy.h / 2 - 16,
+          text: "SCORCH!",
+          life: 0.7,
+          maxLife: 0.7,
+          vy: -30
+        });
+        playScorchSfx();
+      }
+    }
+
+    function createEnemyBurst(enemy) {
+      const count = enemy.kind === "special" ? 16 : 12;
+      let color = "#ff6b6b";
+      if (enemy.kind === "freeze") color = "#5eb8ff";
+      else if (enemy.kind === "scorch") color = "#ff8f38";
+      else if (enemy.kind === "special") color = "#ff2f6d";
+
+      for (let i = 0; i < count; i += 1) {
+        const angle = (Math.PI * 2 * i) / count + Math.random() * 0.4;
+        const speed = 70 + Math.random() * 170;
+        state.particles.push({
+          x: enemy.x + enemy.w / 2,
+          y: enemy.y + enemy.h / 2,
+          vx: Math.cos(angle) * speed,
+          vy: Math.sin(angle) * speed,
+          life: 0.45 + Math.random() * 0.25,
+          maxLife: 0.7,
+          size: 1.4 + Math.random() * 2.1,
+          color
+        });
+      }
+    }
+
+    function spawnEnemy() {
+      const roll = Math.random();
+      let kind = "normal";
+      const levelCfg = LEVEL_CONFIG[state.level];
+      const progressIndex = (state.level - 1) * WAVES_PER_LEVEL + (state.waveInLevel - 1);
+      const powerDropBonus = Math.min(0.14, (state.level - 1) * 0.025 + progressIndex * 0.007);
+      const freezeThreshold = Math.min(0.22, levelCfg.freezeChance + powerDropBonus * 0.5);
+      const scorchThreshold = Math.min(0.32, levelCfg.scorchChance + powerDropBonus);
+      const specialThreshold = Math.min(0.62, Math.max(levelCfg.specialChance, scorchThreshold + 0.08));
+      if (roll < freezeThreshold) {
+        kind = "freeze";
+      } else if (roll < scorchThreshold) {
+        kind = "scorch";
+      } else if (roll < specialThreshold) {
+        kind = "special";
+      }
+
+      const isSpecial = kind === "special";
+      const size = kind === "normal" ? 26 : 30;
+      const waveSpeedMultiplier = 1 + Math.min(0.45, progressIndex * 0.08);
+      const baseSpeed = (90 + Math.random() * 100) * waveSpeedMultiplier;
+      const levelSpeedMultiplier = kind === "normal"
+        ? levelCfg.normalSpeed
+        : isSpecial
+          ? levelCfg.specialSpeed
+          : levelCfg.powerSpeed;
+      const speed = baseSpeed * levelSpeedMultiplier;
+      state.enemies.push({
+        x: Math.random() * (canvas.width - size),
+        y: -size,
+        w: size,
+        h: size,
+        speed,
+        kind,
+        points: kind === "special" ? 20 : kind === "normal" ? 10 : 15
+      });
+    }
+
+    function shoot() {
+      if (!state.running || state.paused || state.endingActive || state.fireCooldown > 0) return;
+      state.bullets.push({
+        x: state.ship.x + state.ship.w / 2 - 2,
+        y: state.ship.y - 8,
+        w: 4,
+        h: 10,
+        speed: 360
+      });
+      state.fireCooldown = 0.18;
+      playShootSfx();
+    }
+
+    function rectHit(a, b) {
+      return a.x < b.x + b.w && a.x + a.w > b.x && a.y < b.y + b.h && a.y + a.h > b.y;
+    }
+
+    function loseLife() {
+      state.lives -= 1;
+      state.damageFlash = 1;
+      updateHud();
+      playShipHitSfx();
+      if (state.lives <= 0) {
+        state.running = false;
+        state.paused = false;
+        state.freezeTime = 0;
+        state.keys.clear();
+        pointerActive = false;
+        updatePauseButton();
+        stopBgm();
+        playGameOverSfx();
+      }
+    }
+
+    function spawnBossBullet(angleOffset = 0) {
+      if (!state.boss) return;
+      const boss = state.boss;
+      const originX = boss.x + boss.w / 2;
+      const originY = boss.y + boss.h * 0.62;
+      const targetX = state.ship.x + state.ship.w / 2;
+      const targetY = state.ship.y + state.ship.h * 0.4;
+      const baseAngle = Math.atan2(targetY - originY, targetX - originX) + angleOffset;
+      const speed = 180 + state.level * 26;
+      state.bossBullets.push({
+        x: originX - 4,
+        y: originY - 4,
+        w: 8,
+        h: 8,
+        vx: Math.cos(baseAngle) * speed,
+        vy: Math.sin(baseAngle) * speed
+      });
+      playTone({ frequency: 160 + state.level * 12, duration: 0.05, type: "square", volume: 0.03 });
+    }
+
+    function update(dt) {
+      const wasInWaveBreak = state.waveBreakTime > 0;
+      state.fireCooldown = Math.max(0, state.fireCooldown - dt);
+      state.damageFlash = Math.max(0, state.damageFlash - dt * 2.6);
+      state.freezeTime = Math.max(0, state.freezeTime - dt);
+      state.scorchFlash = Math.max(0, state.scorchFlash - dt * 3);
+      state.waveBreakTime = Math.max(0, state.waveBreakTime - dt);
+      state.bossHitCooldown = Math.max(0, state.bossHitCooldown - dt);
+
+      if (state.endingActive) {
+        updateFinale(dt);
+        return;
+      }
+
+      if (wasInWaveBreak && state.waveBreakTime <= 0) {
+        if (state.waveBreakAction === "next-wave") {
+          startNextWave();
+        } else if (state.waveBreakAction === "boss" && !state.bossActive && state.boss === null) {
+          startBossBattle();
+        } else {
+          state.waveBreakAction = null;
+        }
+      }
+
+      const movingLeft = state.keys.has("ArrowLeft") || state.keys.has("a") || state.keys.has("A");
+      const movingRight = state.keys.has("ArrowRight") || state.keys.has("d") || state.keys.has("D");
+      if (movingLeft) state.ship.x -= state.ship.speed * dt;
+      if (movingRight) state.ship.x += state.ship.speed * dt;
+      state.ship.x = Math.max(0, Math.min(canvas.width - state.ship.w, state.ship.x));
+
+      const worldSpeedFactor = state.freezeTime > 0 ? 0.12 : 1;
+      if (!state.bossActive && state.waveBreakTime <= 0) {
+        state.enemySpawnTimer -= dt * worldSpeedFactor;
+        if (state.enemySpawnTimer <= 0 && state.waveSpawned < state.waveTarget) {
+          const levelCfg = LEVEL_CONFIG[state.level];
+          const progressIndex = (state.level - 1) * WAVES_PER_LEVEL + (state.waveInLevel - 1);
+          const waveSpawnBoost = Math.min(0.14, progressIndex * 0.015);
+          spawnEnemy();
+          state.waveSpawned += 1;
+          state.enemySpawnTimer = Math.max(levelCfg.spawnMin * 0.75, levelCfg.spawnBase - state.score * 0.0015 - waveSpawnBoost);
+        }
+      }
+
+      state.bullets.forEach((b) => {
+        b.y -= b.speed * dt;
+      });
+      state.bullets = state.bullets.filter((b) => b.y + b.h > 0);
+
+      if (state.bossActive && state.boss) {
+        const boss = state.boss;
+        if (boss.y < boss.entryY) {
+          boss.y += 90 * dt;
+          if (boss.y > boss.entryY) boss.y = boss.entryY;
+        } else {
+          boss.x += boss.speed * boss.dir * dt;
+          if (boss.x <= 12 || boss.x + boss.w >= canvas.width - 12) {
+            boss.dir *= -1;
+            boss.x = Math.max(12, Math.min(canvas.width - boss.w - 12, boss.x));
+          }
+        }
+        boss.spin += dt * (1.1 + state.level * 0.25);
+        boss.shootTimer -= dt;
+        if (boss.y >= boss.entryY && boss.shootTimer <= 0) {
+          spawnBossBullet(0);
+          if (state.level >= 2) spawnBossBullet(-0.2);
+          if (state.level >= 3) spawnBossBullet(0.2);
+          boss.shootTimer = Math.max(0.72, 1.45 - state.level * 0.16);
+        }
+
+        for (let j = state.bullets.length - 1; j >= 0; j -= 1) {
+          const bullet = state.bullets[j];
+          if (rectHit(boss, bullet)) {
+            state.bullets.splice(j, 1);
+            boss.hp -= 10;
+            state.particles.push({
+              x: bullet.x + bullet.w / 2,
+              y: bullet.y,
+              vx: (Math.random() - 0.5) * 120,
+              vy: (Math.random() - 0.5) * 120,
+              life: 0.18,
+              maxLife: 0.18,
+              size: 1.8,
+              color: "#ffd6ec"
+            });
+            if (boss.hp <= 0) {
+              createEnemyBurst({ x: boss.x, y: boss.y, w: boss.w, h: boss.h, kind: "special" });
+              state.score += 120 + state.level * 60;
+              state.popups.push({
+                x: boss.x + boss.w / 2,
+                y: boss.y + boss.h / 2,
+                text: "BOSS DOWN!",
+                life: 1.1,
+                maxLife: 1.1,
+                vy: -24
+              });
+              state.bossActive = false;
+              state.boss = null;
+              state.bossBullets = [];
+              if (state.level === MAX_LEVEL) {
+                startFinale();
+              } else {
+                state.level += 1;
+                state.waveInLevel = 1;
+                state.waveResolved = 0;
+                state.waveSpawned = 0;
+                state.waveTarget = getWaveTargetForLevel(state.level, 1);
+                startWaveBreak(`LEVEL ${state.level} READY`, "level-start");
+                startBgm("normal");
+              }
+              updateHud();
+              break;
+            }
+          }
+        }
+
+        if (state.bossActive && rectHit(boss, state.ship) && state.bossHitCooldown <= 0) {
+          state.bossHitCooldown = 1.1;
+          loseLife();
+        }
+      }
+
+      state.bossBullets.forEach((b) => {
+        b.x += b.vx * dt;
+        b.y += b.vy * dt;
+      });
+      for (let i = state.bossBullets.length - 1; i >= 0; i -= 1) {
+        const b = state.bossBullets[i];
+        if (rectHit(b, state.ship) && state.bossHitCooldown <= 0) {
+          state.bossBullets.splice(i, 1);
+          state.bossHitCooldown = 0.9;
+          loseLife();
+          continue;
+        }
+        if (b.y > canvas.height + 12 || b.y + b.h < -12 || b.x + b.w < -12 || b.x > canvas.width + 12) {
+          state.bossBullets.splice(i, 1);
+        }
+      }
+
+      state.enemies.forEach((e) => {
+        e.y += e.speed * dt * worldSpeedFactor;
+      });
+
+      for (let i = state.enemies.length - 1; i >= 0; i -= 1) {
+        const enemy = state.enemies[i];
+        if (!enemy) continue;
+        let destroyed = false;
+
+        for (let j = state.bullets.length - 1; j >= 0; j -= 1) {
+          const bullet = state.bullets[j];
+          if (rectHit(enemy, bullet)) {
+            state.enemies.splice(i, 1);
+            state.bullets.splice(j, 1);
+            createEnemyBurst(enemy);
+            awardEnemyKill(enemy);
+            updateHud();
+            playEnemyHitSfx();
+            destroyed = true;
+            break;
+          }
+        }
+        if (destroyed) continue;
+
+        if (rectHit(enemy, state.ship)) {
+          state.enemies.splice(i, 1);
+          createEnemyBurst(enemy);
+          state.waveResolved += 1;
+          loseLife();
+          continue;
+        }
+
+        if (enemy.y > canvas.height + enemy.h) {
+          state.enemies.splice(i, 1);
+          state.waveResolved += 1;
+          loseLife();
+        }
+      }
+
+      if (state.pendingScorch) {
+        const scorchedEnemies = state.enemies.splice(0, state.enemies.length);
+        state.waveResolved += scorchedEnemies.length;
+        scorchedEnemies.forEach((target) => {
+          const points = target.points || 10;
+          state.score += points;
+          createEnemyBurst(target);
+          state.popups.push({
+            x: target.x + target.w / 2,
+            y: target.y + target.h / 2,
+            text: `+${points}`,
+            life: 0.45,
+            maxLife: 0.45,
+            vy: -60
+          });
+        });
+        state.pendingScorch = false;
+        updateHud();
+      }
+
+      if (
+        !state.bossActive &&
+        !state.endingActive &&
+        !state.pendingScorch &&
+        state.waveBreakTime <= 0 &&
+        state.waveSpawned >= state.waveTarget &&
+        state.waveResolved >= state.waveTarget &&
+        state.enemies.length === 0
+      ) {
+        startWaveBreak(
+          state.waveInLevel < WAVES_PER_LEVEL ? "WAVE CLEAR!" : "BOSS INCOMING!",
+          state.waveInLevel < WAVES_PER_LEVEL ? "next-wave" : "boss"
+        );
+      }
+
+      state.popups.forEach((p) => {
+        p.life -= dt;
+        p.y += p.vy * dt;
+      });
+      state.popups = state.popups.filter((p) => p.life > 0);
+
+      state.particles.forEach((p) => {
+        p.life -= dt;
+        p.x += p.vx * dt;
+        p.y += p.vy * dt;
+        p.vx *= 0.985;
+        p.vy *= 0.985;
+      });
+      state.particles = state.particles.filter((p) => p.life > 0);
+
+      state.stars.forEach((s) => {
+        s.y += s.speed * dt * (state.freezeTime > 0 ? 0.2 : 1);
+        if (s.y > canvas.height) {
+          s.y = -3;
+          s.x = Math.random() * canvas.width;
+        }
+      });
+    }
+
+    function drawShip() {
+      const shipX = state.ship.x;
+      const shipY = state.endingActive ? state.endingShipY : state.ship.y;
+      const shipScale = state.endingActive ? state.endingShipScale : 1;
+      const shipCenterX = shipX + state.ship.w / 2;
+      const shipCenterY = shipY + state.ship.h / 2;
+
+      ctx.save();
+      ctx.translate(shipCenterX, shipCenterY);
+      ctx.scale(shipScale, shipScale);
+      ctx.fillStyle = "#66f2ff";
+      ctx.beginPath();
+      ctx.moveTo(0, -state.ship.h / 2);
+      ctx.lineTo(state.ship.w / 2, state.ship.h / 2);
+      ctx.lineTo(-state.ship.w / 2, state.ship.h / 2);
+      ctx.closePath();
+      ctx.fill();
+      ctx.restore();
+    }
+
+    function drawBoss() {
+      if (!state.boss) return;
+      const boss = state.boss;
+      const cx = boss.x + boss.w / 2;
+      const cy = boss.y + boss.h / 2;
+      const spikes = 18;
+      const outer = boss.w * 0.5;
+      const inner = boss.w * 0.31;
+
+      ctx.save();
+      ctx.translate(cx, cy);
+      ctx.rotate(boss.spin || 0);
+      ctx.fillStyle = "#ff2f6d";
+      ctx.beginPath();
+      for (let i = 0; i < spikes * 2; i += 1) {
+        const angle = (i / (spikes * 2)) * Math.PI * 2;
+        const radius = i % 2 === 0 ? outer : inner;
+        const x = Math.cos(angle) * radius;
+        const y = Math.sin(angle) * radius;
+        if (i === 0) ctx.moveTo(x, y);
+        else ctx.lineTo(x, y);
+      }
+      ctx.closePath();
+      ctx.fill();
+
+      ctx.fillStyle = "#ff8fb5";
+      ctx.beginPath();
+      ctx.arc(0, 0, boss.w * 0.2, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.restore();
+    }
+
+    function draw() {
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+      state.stars.forEach((s) => {
+        ctx.fillStyle = "#c9d9ff";
+        ctx.fillRect(s.x, s.y, s.size, s.size);
+      });
+
+      state.confetti.forEach((c) => {
+        ctx.save();
+        ctx.translate(c.x, c.y);
+        ctx.rotate(c.rot);
+        ctx.fillStyle = c.color;
+        ctx.fillRect(-c.size / 2, -c.size / 2, c.size, c.size * 0.65);
+        ctx.restore();
+      });
+
+      drawShip();
+
+      ctx.fillStyle = "#ffdf6e";
+      state.bullets.forEach((b) => {
+        ctx.fillRect(b.x, b.y, b.w, b.h);
+      });
+
+      state.enemies.forEach((e) => {
+        if (e.kind === "freeze") {
+          ctx.fillStyle = "#5eb8ff";
+        } else if (e.kind === "scorch") {
+          ctx.fillStyle = "#ff8f38";
+        } else if (e.kind === "special") {
+          ctx.fillStyle = "#ff2f6d";
+        } else {
+          ctx.fillStyle = "#ff6b6b";
+        }
+        ctx.fillRect(e.x, e.y, e.w, e.h);
+      });
+
+      if (state.bossActive) {
+        drawBoss();
+      }
+
+      state.bossBullets.forEach((b) => {
+        ctx.fillStyle = "#ffbfd5";
+        ctx.beginPath();
+        ctx.arc(b.x + b.w / 2, b.y + b.h / 2, b.w * 0.6, 0, Math.PI * 2);
+        ctx.fill();
+      });
+
+      state.particles.forEach((p) => {
+        const alpha = Math.max(0, p.life / p.maxLife);
+        ctx.fillStyle = `${p.color}${Math.round(alpha * 255).toString(16).padStart(2, "0")}`;
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, p.size, 0, Math.PI * 2);
+        ctx.fill();
+      });
+
+      ctx.save();
+      ctx.font = "bold 14px system-ui";
+      ctx.textAlign = "center";
+      state.popups.forEach((p) => {
+        const alpha = Math.max(0, p.life / p.maxLife);
+        ctx.fillStyle = `rgba(255, 230, 120, ${alpha})`;
+        ctx.fillText(p.text, p.x, p.y);
+      });
+      ctx.restore();
+
+      if (state.damageFlash > 0) {
+        ctx.fillStyle = `rgba(255, 32, 32, ${0.36 * state.damageFlash})`;
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+      }
+
+      if (state.freezeTime > 0) {
+        ctx.fillStyle = `rgba(94, 184, 255, ${Math.min(0.22, state.freezeTime * 0.07)})`;
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+      }
+
+      if (state.scorchFlash > 0) {
+        ctx.fillStyle = `rgba(255, 146, 56, ${0.32 * state.scorchFlash})`;
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+      }
+
+      if (state.running && state.paused) {
+        ctx.fillStyle = "rgba(3, 6, 16, 0.55)";
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+        ctx.fillStyle = "#ffffff";
+        ctx.textAlign = "center";
+        ctx.font = "bold 30px system-ui";
+        ctx.fillText("PAUSED", canvas.width / 2, canvas.height / 2);
+      }
+
+      if (state.running && !state.paused && state.waveBreakTime > 0) {
+        ctx.fillStyle = "rgba(8, 16, 36, 0.58)";
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+        ctx.fillStyle = "#bfe0ff";
+        ctx.textAlign = "center";
+        ctx.font = "bold 28px system-ui";
+        ctx.fillText("UPGRADE BREAK", canvas.width / 2, canvas.height / 2 - 10);
+        ctx.font = "16px system-ui";
+        ctx.fillStyle = "#ffffff";
+        ctx.fillText(`Next wave in ${Math.max(1, Math.ceil(state.waveBreakTime))}s`, canvas.width / 2, canvas.height / 2 + 20);
+      }
+
+      if (state.endingActive) {
+        ctx.fillStyle = "rgba(0, 0, 0, 0.18)";
+        ctx.fillRect(0, 0, canvas.width, 70);
+        ctx.fillStyle = "#fff3b0";
+        ctx.textAlign = "center";
+        ctx.font = "bold 24px system-ui";
+        ctx.fillText("Spikey Boy defeated finally!", canvas.width / 2, 44);
+      }
+
+      if (state.bossActive && state.boss) {
+        const barX = 44;
+        const barY = 18;
+        const barW = canvas.width - 88;
+        const barH = 10;
+        const hpRatio = Math.max(0, state.boss.hp / state.boss.maxHp);
+
+        ctx.fillStyle = "rgba(15, 20, 36, 0.75)";
+        ctx.fillRect(barX, barY, barW, barH);
+        ctx.fillStyle = "#ff4b89";
+        ctx.fillRect(barX, barY, barW * hpRatio, barH);
+        ctx.strokeStyle = "#ff9bc1";
+        ctx.lineWidth = 1.5;
+        ctx.strokeRect(barX, barY, barW, barH);
+        ctx.fillStyle = "#ffe3ef";
+        ctx.textAlign = "center";
+        ctx.font = "bold 12px system-ui";
+        ctx.fillText(`${BOSS_NAME} HP ${Math.max(0, state.boss.hp)}/${state.boss.maxHp}`, canvas.width / 2, barY - 4);
+      }
+
+      if (!state.running) {
+        ctx.fillStyle = "rgba(3, 6, 16, 0.72)";
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+        ctx.fillStyle = "#ffffff";
+        ctx.textAlign = "center";
+        ctx.font = "bold 28px system-ui";
+        const title = state.victory ? "Spikey Boy defeated finally!" : state.lives <= 0 ? "Game Over" : "Space Shooter";
+        ctx.fillText(title, canvas.width / 2, canvas.height / 2 - 16);
+        ctx.font = "16px system-ui";
+        ctx.fillText("Press Start / Restart", canvas.width / 2, canvas.height / 2 + 18);
+      }
+    }
+
+    function loop(timestamp) {
+      if (!state.running) {
+        draw();
+        animationFrameId = null;
+        return;
+      }
+      const dt = Math.min((timestamp - state.lastTime) / 1000, 0.033);
+      state.lastTime = timestamp;
+      if (!state.paused) {
+        update(dt);
+      }
+      draw();
+      if (state.running) {
+        animationFrameId = requestAnimationFrame(loop);
+      } else {
+        animationFrameId = null;
+        draw();
+      }
+    }
+
+    window.addEventListener("keydown", (e) => {
+      if (e.key === "p" || e.key === "P") {
+        e.preventDefault();
+        togglePause();
+        return;
+      }
+
+      if (!state.running || state.paused) return;
+      state.keys.add(e.key);
+      if (e.key === " " || e.key === "Spacebar") {
+        e.preventDefault();
+        shoot();
+      }
+    });
+    window.addEventListener("keyup", (e) => {
+      state.keys.delete(e.key);
+    });
+
+    canvas.addEventListener("pointerdown", (e) => {
+      if (!state.running || state.paused) return;
+      pointerActive = true;
+      const rect = canvas.getBoundingClientRect();
+      const x = e.clientX - rect.left;
+      state.ship.x = Math.max(0, Math.min(canvas.width - state.ship.w, x - state.ship.w / 2));
+      shoot();
+    });
+    canvas.addEventListener("pointermove", (e) => {
+      if (!pointerActive || !state.running || state.paused) return;
+      const rect = canvas.getBoundingClientRect();
+      const x = e.clientX - rect.left;
+      state.ship.x = Math.max(0, Math.min(canvas.width - state.ship.w, x - state.ship.w / 2));
+    });
+    window.addEventListener("pointerup", () => {
+      pointerActive = false;
+    });
+    canvas.addEventListener("pointercancel", () => {
+      pointerActive = false;
+    });
+    window.addEventListener("blur", () => {
+      pointerActive = false;
+      state.keys.clear();
+      stopBgm();
+    });
+    window.addEventListener("focus", () => {
+      if (state.running && !state.paused) {
+        startBgm();
+      }
+    });
+
+    pauseBtn.addEventListener("click", togglePause);
+    startBtn.addEventListener("click", resetGame);
+    updateHud();
+    updatePauseButton();
+    draw();
+  </script>
+</body>
+</html>
