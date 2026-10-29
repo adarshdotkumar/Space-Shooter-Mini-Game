@@ -487,6 +487,7 @@
         state.endingActive = false;
         state.victory = true;
         state.running = false;
+        updatePauseButton();
       }
     }
 
@@ -523,7 +524,8 @@
         stopBgm();
       } else {
         state.lastTime = performance.now();
-        startBgm();
+        // The finale plays without music; resuming shouldn't bring it back.
+        if (!state.endingActive) startBgm();
       }
       updatePauseButton();
     }
@@ -705,8 +707,8 @@
         }
       }
 
-      const movingLeft = state.keys.has("ArrowLeft") || state.keys.has("a") || state.keys.has("A");
-      const movingRight = state.keys.has("ArrowRight") || state.keys.has("d") || state.keys.has("D");
+      const movingLeft = state.keys.has("ArrowLeft") || state.keys.has("KeyA");
+      const movingRight = state.keys.has("ArrowRight") || state.keys.has("KeyD");
       if (movingLeft) state.ship.x -= state.ship.speed * dt;
       if (movingRight) state.ship.x += state.ship.speed * dt;
       state.ship.x = Math.max(0, Math.min(canvas.width - state.ship.w, state.ship.x));
@@ -1133,37 +1135,46 @@
       }
     }
 
+    // Keys are tracked by e.code (physical key), so Shift or Caps Lock can't
+    // turn "a" into "A" between keydown and keyup and leave a key stuck.
     window.addEventListener("keydown", (e) => {
-      if (e.key === "p" || e.key === "P") {
+      if (e.code === "KeyP") {
         e.preventDefault();
         togglePause();
         return;
       }
 
+      // While a game is on, Space never reaches a focused button, which
+      // would otherwise restart or resume the game.
+      if (e.code === "Space" && state.running) e.preventDefault();
+
       if (!state.running || state.paused) return;
-      state.keys.add(e.key);
-      if (e.key === " " || e.key === "Spacebar") {
-        e.preventDefault();
+      state.keys.add(e.code);
+      if (e.code === "Space") {
         shoot();
       }
     });
     window.addEventListener("keyup", (e) => {
-      state.keys.delete(e.key);
+      state.keys.delete(e.code);
     });
+
+    // The canvas is drawn at 390px wide but displayed at whatever width the
+    // page gives it, so pointer positions are scaled into canvas pixels.
+    function moveShipToPointer(e) {
+      const rect = canvas.getBoundingClientRect();
+      const x = (e.clientX - rect.left) * (canvas.width / rect.width);
+      state.ship.x = Math.max(0, Math.min(canvas.width - state.ship.w, x - state.ship.w / 2));
+    }
 
     canvas.addEventListener("pointerdown", (e) => {
       if (!state.running || state.paused) return;
       pointerActive = true;
-      const rect = canvas.getBoundingClientRect();
-      const x = e.clientX - rect.left;
-      state.ship.x = Math.max(0, Math.min(canvas.width - state.ship.w, x - state.ship.w / 2));
+      moveShipToPointer(e);
       shoot();
     });
     canvas.addEventListener("pointermove", (e) => {
       if (!pointerActive || !state.running || state.paused) return;
-      const rect = canvas.getBoundingClientRect();
-      const x = e.clientX - rect.left;
-      state.ship.x = Math.max(0, Math.min(canvas.width - state.ship.w, x - state.ship.w / 2));
+      moveShipToPointer(e);
     });
     window.addEventListener("pointerup", () => {
       pointerActive = false;
@@ -1177,13 +1188,21 @@
       stopBgm();
     });
     window.addEventListener("focus", () => {
-      if (state.running && !state.paused) {
+      if (state.running && !state.paused && !state.endingActive) {
         startBgm();
       }
     });
 
-    pauseBtn.addEventListener("click", togglePause);
-    startBtn.addEventListener("click", resetGame);
+    // A mouse click leaves focus on the button, where a later Space or Enter
+    // would press it again. Keyboard presses (detail 0) keep their focus.
+    pauseBtn.addEventListener("click", (e) => {
+      if (e.detail > 0) pauseBtn.blur();
+      togglePause();
+    });
+    startBtn.addEventListener("click", (e) => {
+      if (e.detail > 0) startBtn.blur();
+      resetGame();
+    });
     updateHud();
     updatePauseButton();
     draw();
